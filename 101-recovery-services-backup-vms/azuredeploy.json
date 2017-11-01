@@ -1,54 +1,198 @@
 {
-    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
-    "contentVersion": "1.0.0.0",
-    "parameters": {
-        "existingVirtualMachinesResourceGroup": {
-            "type": "string",
-            "metadata": {
-                "description": "Resource group where the virtual machines are located. This can be different than resource group of the vault. "
-            }
-        },
-        "existingVirtualMachines": {
-            "type": "array",
-            "metadata": {
-                "description": "Array of Azure virtual machines. e.g. [\"vm1\",\"vm2\",\"vm3\"]"
-            }
-        },
-        "existingRecoveryServicesVault": {
-            "type": "string",
-            "metadata": {
-                "description": "Recovery services vault name where the VMs will be backed up to. "
-            }
-        },
-        "existingBackupPolicy": {
-            "type": "string",
-            "defaultValue": "DefaultPolicy",
-            "metadata": {
-                "description": "Backup policy to be used to backup VMs. Backup POlicy defines the schedule of the backup and how long to retain backup copies. By default every vault comes with a 'DefaultPolicy' which canbe used here."
-            }
-        }
+  "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+
+    "keyVaultNm": {
+      "value": null,
+      "type": "string",
+      "metadata": {
+        "description": "Key vault name, contains keys for logging into the AD"
+      }
     },
-    "variables": {
-        "backupFabric": "Azure",
-        "v2VmType": "Microsoft.Compute/virtualMachines",
-        "v2VmContainer": "iaasvmcontainer;iaasvmcontainerv2;",
-        "v2Vm": "vm;iaasvmcontainerv2;"
+
+    "keyVaultRg": {
+      "value": null,
+      "type": "string",
+      "metadata": {
+        "description": "Resource Group for the above Key vault"
+      }
     },
-    "resources": [
-        {
-            "name": "[concat(parameters('existingRecoveryServicesVault'), '/', variables('backupFabric'), '/', variables('v2VmContainer'), concat(parameters('existingVirtualMachinesResourceGroup'),';',parameters('existingVirtualMachines')[copyIndex()]), '/', variables('v2Vm'), concat(parameters('existingVirtualMachinesResourceGroup'),';',parameters('existingVirtualMachines')[copyIndex()]))]",
-            "apiVersion": "2016-06-01",
-            "location": "[resourceGroup().location]",
-            "type": "Microsoft.RecoveryServices/vaults/backupFabrics/protectionContainers/protectedItems",
-            "copy": {
-                "name": "v2VmsCopy",
-                "count": "[length(parameters('existingVirtualMachines'))]"
+	"nodeName": {
+      "value": null,
+      "type": "String",
+      "metadata": {
+        "description": "Name of the scale set, i.e. jpdc-dev"
+      }
+    },
+
+    "settings": {
+      "value": null,
+      "type": "object",
+      "metadata": {
+        "description": "Object Containing all of the common settings for AD, api versions, VM Sizing, etc. See the parameters-XXX.json."
+      }
+    },
+    "templateUrl": {
+      "value": null,
+      "type": "string",
+      "metadata": {
+        "description": "Base URL where the JPDC Templates are located"
+      }
+    }
+  },
+
+  "variables": {
+    "availabilitySetName": "[concat('jpdc-avail', parameters('settings').locationAbbrv)]",
+    "keyVault": "[concat('/subscriptions/', subscription().subscriptionId, '/resourceGroups/', parameters('keyVaultRg'), '/providers/Microsoft.KeyVault/vaults/', parameters('keyVaultNm'))]",
+    "devUrl": "[concat(parameters('templateUrl'), '/dev.json')]",
+	"policyUrl": "[concat(parameters('templateUrl'), '/policy.json')]",
+	"backupUrl": "[concat(parameters('templateUrl'), '/backup.json')]",
+	"resourcegrp": "[concat('jpdc','-arm', parameters('settings').locationAbbrv, '-rg')]",
+	"vmName": "[parameters('nodeName').name,'-vm']",
+	"devNodePre": "[concat('jpdc-', toLower(parameters('settings').stage), parameters('settings').locationAbbrv)]"
+  },
+  "resources": [
+  {
+      "name": "devNodes",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "[parameters('settings').apiVersions.deploy]",
+      "dependsOn": [
+       "[concat('Microsoft.Compute/availabilitySets/', variables('availabilitySetName'))]"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "templateLink": {
+          "uri": "[variables('devUrl')]",
+          "contentVersion": "1.0.0.0"
+        },
+
+		"parameters": {
+          "devDisksUrl": {
+            "value": "[concat(parameters('templateUrl'), '/devDisks.json')]"
+          },
+          "nodeName":
+          {
+            "value":{
+              "name": "jpdc-dev"
             },
-            "properties": {
-                "protectedItemType": "[variables('v2VmType')]",
-                "policyId": "[resourceId('Microsoft.RecoveryServices/vaults/backupPolicies',parameters('existingRecoveryServicesVault'),parameters('existingBackupPolicy') )]",
-                "sourceResourceId": "[resourceId(subscription().subscriptionId,parameters('existingVirtualMachinesResourceGroup'),'Microsoft.Compute/virtualMachines',parameters('existingVirtualMachines')[copyIndex()])]"
-            }
+
+          "settings": {
+            "value": "[parameters('settings')]"
+          },
+		  "availabilitySetName": {
+            "value": "[variables('availabilitySetName')]"
+          }
         }
-    ]
+	  }
+	 }
+    },
+  {
+      "comments": "Availabity set that contains the nodes, do not want both down at the same time.",
+      "type": "Microsoft.Compute/availabilitySets",
+      "sku": {
+        "name": "Aligned"
+      },
+      "name": "[variables('availabilitySetName')]",
+      "apiVersion": "[parameters('settings').apiVersions.compute]",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "platformUpdateDomainCount": 5,
+        "platformFaultDomainCount": 2
+      }
+    },
+	
+    {
+      "name": "JPDC-Dev-Policy",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "[parameters('settings').apiVersions.deploy]",
+      "dependsOn": [
+        "[concat('Microsoft.Compute/availabilitySets/', variables('availabilitySetName'))]"
+      ],
+
+      "properties": {
+        "mode": "Incremental",
+        "templateLink": {
+          "uri": "[variables('policyUrl')]",
+          "contentVersion": "1.0.0.0"
+        },
+
+    "parameters": {
+    "vaultName": {
+      "value": "devbackup"
+    },
+    "policyName": {
+        "value": "MonthlyBackupPolicy1"
+    },
+    "scheduleRunDays": {
+        "value": [ "Sunday", "Tuesday", "Thursday" ]
+    },
+    "scheduleRunTimes": {
+        "value": [ "2016-09-21T05:30:00Z" ]
+    },
+    "weeklyRetentionDurationCount": {
+        "value": 104
+    },
+    "daysOfTheWeekForMontlyRetention": {
+        "value": [ "Sunday", "Tuesday" ]
+    },
+    "weeksOfTheMonthForMonthlyRetention": {
+        "value": [ "First", "Third" ]
+    },
+    "monthlyRetentionDurationCount": {
+        "value": 60
+    },
+    "monthsOfYear": {
+        "value": [ "January", "March", "August" ]
+    },
+    "daysOfTheWeekForYearlyRetention": {
+        "value": [ "Sunday", "Tuesday" ]
+    },
+    "weeksOfTheMonthForYearlyRetention": {
+        "value": [ "First", "Third" ]
+    },
+    "yearlyRetentionDurationCount": {
+        "value": 10
+    }
+  }
+      }
+    },
+    {
+      "name": "[concat('JPDC-Dev-Backup-', copyIndex(1))]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "[parameters('settings').apiVersions.deploy]",
+      "dependsOn": [
+        "[concat('Microsoft.Compute/availabilitySets/', variables('availabilitySetName'))]",
+        "[concat('Microsoft.Resources/deployments/', 'JPDC-Dev-Policy')]",
+		"[concat('Microsoft.Resources/deployments/', 'devNodes')]"
+      ],
+      "copy": {
+        "name": "devbackupcopy",
+        "count": "[parameters('settings').nodeCount.devvm]"
+      },
+      "properties": {
+        "mode": "Incremental",
+        "templateLink": {
+          "uri": "[variables('backupUrl')]",
+          "contentVersion": "1.0.0.0"
+        },
+
+        "parameters": {
+
+    "existingVirtualMachinesResourceGroup": {
+      "value": "[variables('resourcegrp')]"
+    },
+    "existingVirtualMachines": {
+      "value": ["[concat(variables('devNodePre'))]"]
+    },
+    "existingRecoveryServicesVault": {
+      "value": "devbackup"
+    },
+    "existingBackupPolicy": {
+      "value": "MonthlyBackupPolicy1"
+    }
+  }
+      }
+    }
+  ]
 }
